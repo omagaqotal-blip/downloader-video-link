@@ -7,8 +7,6 @@ import subprocess
 import json
 import re
 import time
-import ssl
-import certifi
 from pathlib import Path
 
 GREEN = '\033[0;32m'
@@ -107,7 +105,7 @@ def get_video_info(url):
         if result.returncode != 0:
             error_msg = result.stderr[:300]
             if 'CERTIFICATE_VERIFY_FAILED' in error_msg:
-                return {'error': 'Error SSL. Coba jalankan: python -c "import ssl; ssl._create_default_https_context = ssl._create_unverified_context"'}
+                return {'error': 'Error SSL. Jalankan: export PYTHONHTTPSVERIFY=0'}
             return {'error': f'Gagal menganalisis: {error_msg}'}
         
         data = json.loads(result.stdout)
@@ -415,9 +413,8 @@ def main():
     if 'error' in info:
         print_step('error', info['error'])
         if 'SSL' in info['error']:
-            print_step('info', 'Coba jalankan perintah berikut di Termux:')
-            print_step('info', 'export PYTHONHTTPSVERIFY=0')
-            print_step('info', 'python ytdl.py "' + url + '"')
+            print_step('info', 'Coba jalankan: export PYTHONHTTPSVERIFY=0')
+            print_step('info', 'Lalu jalankan ulang: python ytdl.py "' + url + '"')
         sys.exit(1)
     
     if not info['video_formats']:
