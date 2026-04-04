@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ytdl.py - Universal Video Downloader
+# ytdl.py - Universal Video Downloader dengan Auto-Cookies
 
 import os
 import sys
@@ -7,7 +7,10 @@ import subprocess
 import json
 import re
 import time
+import hashlib
+import base64
 from pathlib import Path
+from datetime import datetime
 
 GREEN = '\033[0;32m'
 YELLOW = '\033[1;33m'
@@ -17,47 +20,27 @@ BLUE = '\033[0;34m'
 NC = '\033[0m'
 
 DOWNLOAD_DIR = Path.home() / "downloads"
+COOKIE_DIR = Path.home() / ".ytdlp_cookies"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+COOKIE_DIR.mkdir(exist_ok=True)
 
-def clear():
-    os.system('clear')
+UNICODE_KEYS = {
+    "default": "YTDLP2024_SECURE_KEY_9f8d7e6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5",
+    "gPsLIrQyYKY": "7f8d9e0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5",
+    "69c5357e37679": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8"
+}
 
-def print_banner():
-    print(f"""
-{CYAN}╔══════════════════════════════════════════════════════════════╗
-║                    UNIVERSAL DOWNLOADER                          ║
-║              Support: YouTube, TikTok, Bilibili, dll             ║
-╚══════════════════════════════════════════════════════════════╝{NC}
-""")
+def get_unicode_key(url):
+    for key, value in UNICODE_KEYS.items():
+        if key in url or key == "default":
+            return value
+    return UNICODE_KEYS["default"]
 
-def print_step(step, message):
-    icons = {
-        'info': f'{CYAN}[i]{NC}',
-        'success': f'{GREEN}[✓]{NC}',
-        'warning': f'{YELLOW}[!]{NC}',
-        'error': f'{RED}[✗]{NC}',
-        'download': f'{BLUE}[↓]{NC}'
-    }
-    print(f"{icons.get(step, '[ ]')} {message}")
-
-def format_size(bytes):
-    if bytes == 0:
-        return "0 B"
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if bytes < 1024:
-            return f"{bytes:.1f} {unit}"
-        bytes /= 1024
-    return f"{bytes:.1f} TB"
-
-def format_time(seconds):
-    if not seconds or seconds < 0:
-        return "--:--"
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    if h > 0:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
+def generate_cookie_key(url):
+    unicode_key = get_unicode_key(url)
+    today = datetime.now().strftime("%Y%m%d")
+    combined = f"{unicode_key}_{today}_{url}"
+    return hashlib.sha256(combined.encode()).hexdigest()[:32]
 
 def check_dependencies():
     print_step('info', 'Memeriksa dependencies...')
@@ -89,24 +72,77 @@ def check_dependencies():
     else:
         print_step('success', 'Semua dependencies sudah tersedia')
 
+def get_cookies(url):
+    cookie_file = COOKIE_DIR / f"cookies_{generate_cookie_key(url)}.txt"
+    
+    if cookie_file.exists():
+        if time.time() - cookie_file.stat().st_mtime < 3600:
+            return str(cookie_file)
+    
+    print_step('info', 'Mengambil cookies dari browser...')
+    
+    try:
+        subprocess.run([
+            'yt-dlp', '--cookies-from-browser', 'chrome', 
+            '--cookies', str(cookie_file)
+        ], capture_output=True, check=True)
+        
+        if cookie_file.exists():
+            print_step('success', 'Cookies berhasil diambil')
+            return str(cookie_file)
+    except:
+        pass
+    
+    try:
+        subprocess.run([
+            'yt-dlp', '--cookies-from-browser', 'firefox', 
+            '--cookies', str(cookie_file)
+        ], capture_output=True, check=True)
+        
+        if cookie_file.exists():
+            print_step('success', 'Cookies berhasil diambil')
+            return str(cookie_file)
+    except:
+        pass
+    
+    return None
+
 def get_video_info(url):
     print_step('info', f'Menganalisis link: {url}')
+    
+    cookie_file = get_cookies(url)
     
     cmd = [
         'yt-dlp', '-J', '--no-playlist', '--no-warnings',
         '--geo-bypass', '--no-check-certificate',
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        url
+        '--extractor-args', 'youtube:player-client=android,web',
+        '--sleep-requests', '1',
+        '--sleep-interval', '2',
+        '--max-sleep-interval', '5'
     ]
     
+    if cookie_file:
+        cmd.extend(['--cookies', cookie_file])
+    
+    cmd.append(url)
+    
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         
         if result.returncode != 0:
-            error_msg = result.stderr[:300]
-            if 'CERTIFICATE_VERIFY_FAILED' in error_msg:
-                return {'error': 'Error SSL. Jalankan: export PYTHONHTTPSVERIFY=0'}
-            return {'error': f'Gagal menganalisis: {error_msg}'}
+            error_msg = result.stderr[:500]
+            
+            if 'Sign in to confirm' in error_msg or 'bot' in error_msg:
+                print_step('warning', 'YouTube meminta verifikasi...')
+                print_step('info', 'Coba buka browser dan login ke YouTube terlebih dahulu')
+                print_step('info', 'Lalu jalankan ulang perintah ini')
+                return {'error': 'Bot detection - Buka browser dan login ke YouTube dulu'}
+            
+            if cookie_file and Path(cookie_file).exists():
+                Path(cookie_file).unlink()
+            
+            return {'error': f'Gagal: {error_msg[:200]}'}
         
         data = json.loads(result.stdout)
         
@@ -213,11 +249,51 @@ def get_video_info(url):
         }
         
     except subprocess.TimeoutExpired:
-        return {'error': 'Timeout saat menganalisis link (mungkin video terlalu panjang)'}
+        return {'error': 'Timeout saat menganalisis link'}
     except json.JSONDecodeError:
         return {'error': 'Gagal memproses data dari server'}
     except Exception as e:
         return {'error': str(e)}
+
+def format_size(bytes):
+    if bytes == 0:
+        return "0 B"
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes < 1024:
+            return f"{bytes:.1f} {unit}"
+        bytes /= 1024
+    return f"{bytes:.1f} TB"
+
+def format_time(seconds):
+    if not seconds or seconds < 0:
+        return "--:--"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+def clear():
+    os.system('clear')
+
+def print_banner():
+    print(f"""
+{CYAN}╔══════════════════════════════════════════════════════════════╗
+║                    UNIVERSAL DOWNLOADER                          ║
+║              Support: YouTube, TikTok, Bilibili, dll             ║
+╚══════════════════════════════════════════════════════════════╝{NC}
+""")
+
+def print_step(step, message):
+    icons = {
+        'info': f'{CYAN}[i]{NC}',
+        'success': f'{GREEN}[✓]{NC}',
+        'warning': f'{YELLOW}[!]{NC}',
+        'error': f'{RED}[✗]{NC}',
+        'download': f'{BLUE}[↓]{NC}'
+    }
+    print(f"{icons.get(step, '[ ]')} {message}")
 
 def show_menu(info):
     clear()
@@ -287,13 +363,23 @@ def download_video(url, format_id, audio_id, title, resolution):
     else:
         format_spec = format_id
     
+    cookie_file = get_cookies(url)
+    
     cmd = [
         'yt-dlp', '-f', format_spec, '--merge-output-format', 'mp4',
         '-o', str(filepath), '--no-playlist', '--progress', '--no-warnings',
         '--geo-bypass', '--no-check-certificate',
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        url
+        '--extractor-args', 'youtube:player-client=android,web',
+        '--sleep-requests', '1',
+        '--sleep-interval', '2',
+        '--max-sleep-interval', '5'
     ]
+    
+    if cookie_file:
+        cmd.extend(['--cookies', cookie_file])
+    
+    cmd.append(url)
     
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -347,13 +433,23 @@ def download_audio(url, format_id, title, quality):
     print_step('info', f'Judul: {title}')
     print_step('info', f'Lokasi: {filepath}\n')
     
+    cookie_file = get_cookies(url)
+    
     cmd = [
         'yt-dlp', '-f', format_id, '-x', '--audio-format', 'mp3',
         '-o', str(filepath), '--no-playlist', '--progress', '--no-warnings',
         '--geo-bypass', '--no-check-certificate',
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        url
+        '--extractor-args', 'youtube:player-client=android,web',
+        '--sleep-requests', '1',
+        '--sleep-interval', '2',
+        '--max-sleep-interval', '5'
     ]
+    
+    if cookie_file:
+        cmd.extend(['--cookies', cookie_file])
+    
+    cmd.append(url)
     
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -412,9 +508,11 @@ def main():
     
     if 'error' in info:
         print_step('error', info['error'])
-        if 'SSL' in info['error']:
-            print_step('info', 'Coba jalankan: export PYTHONHTTPSVERIFY=0')
-            print_step('info', 'Lalu jalankan ulang: python ytdl.py "' + url + '"')
+        if 'bot' in info['error'].lower() or 'sign in' in info['error'].lower():
+            print_step('info', '\nSOLUSI:')
+            print_step('info', '1. Buka browser di HP/komputer')
+            print_step('info', '2. Buka youtube.com dan login')
+            print_step('info', '3. Jalankan ulang perintah ini')
         sys.exit(1)
     
     if not info['video_formats']:
