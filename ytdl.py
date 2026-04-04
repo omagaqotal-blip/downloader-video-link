@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ytdl.py - YouTube Downloader dengan Menu Interaktif
+# ytdl.py - Universal Video Downloader
 
 import os
 import sys
@@ -7,7 +7,8 @@ import subprocess
 import json
 import re
 import time
-import shutil
+import ssl
+import certifi
 from pathlib import Path
 
 GREEN = '\033[0;32m'
@@ -26,8 +27,8 @@ def clear():
 def print_banner():
     print(f"""
 {CYAN}╔══════════════════════════════════════════════════════════════╗
-║                    YOUTUBE DOWNLOADER                            ║
-║                    Support: YouTube, TikTok, Bilibili            ║
+║                    UNIVERSAL DOWNLOADER                          ║
+║              Support: YouTube, TikTok, Bilibili, dll             ║
 ╚══════════════════════════════════════════════════════════════╝{NC}
 """)
 
@@ -83,7 +84,7 @@ def check_dependencies():
         print_step('info', f'Menginstall: {", ".join(missing)}')
         for dep in missing:
             if dep == 'yt-dlp':
-                subprocess.run(['pip', 'install', 'yt-dlp'], check=True)
+                subprocess.run(['pip', 'install', 'yt-dlp', '--upgrade'], check=True)
             else:
                 subprocess.run(['pkg', 'install', dep, '-y'], check=True)
         print_step('success', 'Semua dependencies berhasil diinstall!')
@@ -95,21 +96,25 @@ def get_video_info(url):
     
     cmd = [
         'yt-dlp', '-J', '--no-playlist', '--no-warnings',
-        '--geo-bypass', url
+        '--geo-bypass', '--no-check-certificate',
+        '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        url
     ]
     
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         
         if result.returncode != 0:
-            return {'error': f'Gagal menganalisis: {result.stderr[:200]}'}
+            error_msg = result.stderr[:300]
+            if 'CERTIFICATE_VERIFY_FAILED' in error_msg:
+                return {'error': 'Error SSL. Coba jalankan: python -c "import ssl; ssl._create_default_https_context = ssl._create_unverified_context"'}
+            return {'error': f'Gagal menganalisis: {error_msg}'}
         
         data = json.loads(result.stdout)
         
         formats = data.get('formats', [])
         title = data.get('title', 'Unknown Title')
         duration = data.get('duration', 0)
-        thumbnail = data.get('thumbnail', '')
         
         safe_title = re.sub(r'[^\w\s-]', '', title)
         safe_title = re.sub(r'[-\s]+', '-', safe_title).strip('-')[:50]
@@ -138,7 +143,7 @@ def get_video_info(url):
                     res = f'{height}p'
                 
                 if fps >= 60:
-                    res = f'{res} {fps}fps'
+                    res = f'{res}{fps}fps'
                 
                 key = f"{height}_{fps}"
                 
@@ -205,13 +210,12 @@ def get_video_info(url):
             'safe_title': safe_title,
             'duration': duration,
             'duration_str': format_time(duration),
-            'thumbnail': thumbnail,
             'video_formats': video_formats,
             'audio_formats': audio_formats
         }
         
     except subprocess.TimeoutExpired:
-        return {'error': 'Timeout saat menganalisis link'}
+        return {'error': 'Timeout saat menganalisis link (mungkin video terlalu panjang)'}
     except json.JSONDecodeError:
         return {'error': 'Gagal memproses data dari server'}
     except Exception as e:
@@ -288,7 +292,9 @@ def download_video(url, format_id, audio_id, title, resolution):
     cmd = [
         'yt-dlp', '-f', format_spec, '--merge-output-format', 'mp4',
         '-o', str(filepath), '--no-playlist', '--progress', '--no-warnings',
-        '--geo-bypass', url
+        '--geo-bypass', '--no-check-certificate',
+        '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        url
     ]
     
     try:
@@ -346,7 +352,9 @@ def download_audio(url, format_id, title, quality):
     cmd = [
         'yt-dlp', '-f', format_id, '-x', '--audio-format', 'mp3',
         '-o', str(filepath), '--no-playlist', '--progress', '--no-warnings',
-        '--geo-bypass', url
+        '--geo-bypass', '--no-check-certificate',
+        '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        url
     ]
     
     try:
@@ -387,7 +395,7 @@ def main():
     else:
         clear()
         print_banner()
-        url = input(f"{YELLOW}Masukkan YouTube URL: {NC}").strip()
+        url = input(f"{YELLOW}Masukkan URL video: {NC}").strip()
     
     if not url:
         print_step('error', 'URL tidak boleh kosong!')
@@ -406,6 +414,14 @@ def main():
     
     if 'error' in info:
         print_step('error', info['error'])
+        if 'SSL' in info['error']:
+            print_step('info', 'Coba jalankan perintah berikut di Termux:')
+            print_step('info', 'export PYTHONHTTPSVERIFY=0')
+            print_step('info', 'python ytdl.py "' + url + '"')
+        sys.exit(1)
+    
+    if not info['video_formats']:
+        print_step('error', 'Tidak ada format video yang tersedia untuk link ini')
         sys.exit(1)
     
     while True:
