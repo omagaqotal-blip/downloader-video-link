@@ -1,115 +1,110 @@
 #!/usr/bin/env python3
-# YouTube Video Downloader for Termux
-
 import os
 import sys
 import subprocess
+import json
 import argparse
 from pathlib import Path
 
 def check_dependencies():
-    """Check and install required dependencies"""
-    dependencies = {
-        'yt-dlp': 'yt-dlp',
-        'ffmpeg': 'ffmpeg'
-    }
-    
     missing = []
-    for dep, package in dependencies.items():
+    for dep in ['yt-dlp', 'ffmpeg']:
         result = subprocess.run(['which', dep], capture_output=True, text=True)
         if result.returncode != 0:
-            missing.append(package)
+            missing.append(dep)
     
     if missing:
-        print(f"Installing missing dependencies: {', '.join(missing)}")
-        for package in missing:
-            subprocess.run(['pkg', 'install', package, '-y'], check=True)
-        print("Dependencies installed successfully!")
-    else:
-        print("All dependencies are already installed")
+        print(f"Installing: {', '.join(missing)}")
+        for dep in missing:
+            if dep == 'yt-dlp':
+                subprocess.run(['pip', 'install', 'yt-dlp'], check=True)
+            else:
+                subprocess.run(['pkg', 'install', dep, '-y'], check=True)
+        print("Dependencies installed!")
 
-def download_video(url, output_path=None, quality='best'):
-    """Download video from YouTube"""
-    
-    if output_path is None:
-        output_path = os.path.join(os.getcwd(), 'downloads')
-    
-    Path(output_path).mkdir(parents=True, exist_ok=True)
+def get_video_info(url):
+    cmd = ['yt-dlp', '--dump-json', '--no-playlist', url]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        return json.loads(result.stdout)
+    return None
+
+def download_video(url, quality='best', output_dir='downloads'):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     quality_map = {
         'best': 'bestvideo+bestaudio/best',
         '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
         '720p': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
         '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+        '360p': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
         'audio': 'bestaudio/best'
     }
     
     format_spec = quality_map.get(quality, quality_map['best'])
     
-    cmd = [
-        'yt-dlp',
-        '-f', format_spec,
-        '--merge-output-format', 'mp4' if quality != 'audio' else 'mp3',
-        '-o', f'{output_path}/%(title)s.%(ext)s',
-        '--no-playlist',
-        '--progress',
-        url
-    ]
+    cmd = ['yt-dlp', '-f', format_spec, '--merge-output-format', 'mp4',
+           '-o', f'{output_dir}/%(title)s.%(ext)s', '--no-playlist', '--progress', url]
     
     if quality == 'audio':
-        cmd.extend(['-x', '--audio-format', 'mp3'])
+        cmd = ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', f'{output_dir}/%(title)s.%(ext)s', url]
+    
+    print(f"\nDownloading: {url}")
+    print(f"Quality: {quality}")
+    print(f"Output: {output_dir}\n")
     
     try:
-        print(f"Downloading from: {url}")
-        print(f"Quality: {quality}")
-        print(f"Saving to: {output_path}")
         subprocess.run(cmd, check=True)
-        print("Download completed successfully!")
+        print("\n✓ Download completed!")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Download failed: {e}")
+        print(f"\n✗ Failed: {e}")
         return False
 
-def download_playlist(url, output_path=None, quality='best', max_count=None):
-    """Download YouTube playlist"""
+def interactive_mode():
+    print("\n" + "="*50)
+    print("YOUTUBE DOWNLOADER FOR TERMUX")
+    print("="*50)
     
-    if output_path is None:
-        output_path = os.path.join(os.getcwd(), 'downloads')
+    url = input("\nEnter YouTube URL: ").strip()
+    if not url:
+        print("URL required!")
+        return
     
-    Path(output_path).mkdir(parents=True, exist_ok=True)
+    print("\nQuality options:")
+    print("1. Best quality")
+    print("2. 1080p")
+    print("3. 720p")
+    print("4. 480p")
+    print("5. 360p")
+    print("6. Audio only (MP3)")
     
-    cmd = [
-        'yt-dlp',
-        '-f', 'bestvideo+bestaudio/best',
-        '--merge-output-format', 'mp4',
-        '-o', f'{output_path}/%(playlist_title)s/%(title)s.%(ext)s',
-        '--yes-playlist',
-        '--progress'
-    ]
+    choice = input("\nChoose (1-6): ").strip()
     
-    if max_count:
-        cmd.extend(['--playlist-end', str(max_count)])
+    quality_map = {
+        '1': 'best', '2': '1080p', '3': '720p',
+        '4': '480p', '5': '360p', '6': 'audio'
+    }
     
-    cmd.append(url)
+    quality = quality_map.get(choice, 'best')
     
-    try:
-        print(f"Downloading playlist from: {url}")
-        subprocess.run(cmd, check=True)
-        print("Playlist download completed!")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Playlist download failed: {e}")
-        return False
+    output_dir = input("Output directory [downloads]: ").strip()
+    if not output_dir:
+        output_dir = 'downloads'
+    
+    download_video(url, quality, output_dir)
 
 def main():
-    parser = argparse.ArgumentParser(description='YouTube Video Downloader for Termux')
-    parser.add_argument('url', help='YouTube video or playlist URL')
-    parser.add_argument('-q', '--quality', choices=['best', '1080p', '720p', '480p', 'audio'], 
-                       default='best', help='Video quality (default: best)')
-    parser.add_argument('-o', '--output', help='Output directory (default: ./downloads)')
-    parser.add_argument('-p', '--playlist', action='store_true', help='Download as playlist')
-    parser.add_argument('-m', '--max', type=int, help='Maximum videos to download from playlist')
-    parser.add_argument('--setup', action='store_true', help='Install dependencies only')
+    if len(sys.argv) == 1:
+        interactive_mode()
+        return
+    
+    parser = argparse.ArgumentParser(description='YouTube Downloader')
+    parser.add_argument('url', nargs='?', help='YouTube URL')
+    parser.add_argument('-q', '--quality', choices=['best', '1080p', '720p', '480p', '360p', 'audio'], 
+                       default='best', help='Video quality')
+    parser.add_argument('-o', '--output', default='downloads', help='Output directory')
+    parser.add_argument('--setup', action='store_true', help='Install dependencies')
     
     args = parser.parse_args()
     
@@ -118,16 +113,11 @@ def main():
         return
     
     if not args.url:
-        print("Error: URL is required")
-        parser.print_help()
+        print("Error: URL required")
         sys.exit(1)
     
     check_dependencies()
-    
-    if args.playlist:
-        download_playlist(args.url, args.output, args.quality, args.max)
-    else:
-        download_video(args.url, args.output, args.quality)
+    download_video(args.url, args.quality, args.output)
 
 if __name__ == "__main__":
     main()
