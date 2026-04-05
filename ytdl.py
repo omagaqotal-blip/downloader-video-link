@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ytdl.py - Universal Video Downloader (Fix Bot Detection)
+# ytdl.py - Universal Video Downloader
 
 import os
 import sys
@@ -7,9 +7,10 @@ import subprocess
 import json
 import re
 import time
+import ssl
+import certifi
 from pathlib import Path
 
-# Warna untuk tampilan terminal
 GREEN = '\033[0;32m'
 YELLOW = '\033[1;33m'
 RED = '\033[0;31m'
@@ -17,7 +18,6 @@ CYAN = '\033[0;36m'
 BLUE = '\033[0;34m'
 NC = '\033[0m'
 
-# Folder download
 DOWNLOAD_DIR = Path.home() / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
@@ -62,209 +62,164 @@ def format_time(seconds):
     return f"{m}:{s:02d}"
 
 def check_dependencies():
-    """Memeriksa dan menginstall dependency satu per satu"""
     print_step('info', 'Memeriksa dependencies...')
     
-    # Update package list dulu
-    try:
-        subprocess.run(['pkg', 'update', '-y'], capture_output=True, check=True)
-        print_step('success', 'Package list updated')
-    except:
-        print_step('warning', 'Gagal update package list, melanjutkan...')
+    missing = []
     
-    # Cek dan install yt-dlp
     try:
         subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
         print_step('success', 'yt-dlp sudah terinstall')
     except:
         print_step('warning', 'yt-dlp tidak ditemukan, menginstall...')
-        try:
-            subprocess.run(['pip', 'install', 'yt-dlp', '--upgrade'], check=True)
-            print_step('success', 'yt-dlp berhasil diinstall')
-        except:
-            print_step('error', 'Gagal install yt-dlp via pip, coba metode lain...')
-            subprocess.run(['pkg', 'install', 'yt-dlp', '-y'], check=True)
-            print_step('success', 'yt-dlp berhasil diinstall via pkg')
+        missing.append('yt-dlp')
     
-    # Cek dan install ffmpeg
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
         print_step('success', 'ffmpeg sudah terinstall')
     except:
         print_step('warning', 'ffmpeg tidak ditemukan, menginstall...')
-        subprocess.run(['pkg', 'install', 'ffmpeg', '-y'], check=True)
-        print_step('success', 'ffmpeg berhasil diinstall')
+        missing.append('ffmpeg')
     
-    print_step('success', 'Semua dependencies siap!')
+    if missing:
+        print_step('info', f'Menginstall: {", ".join(missing)}')
+        for dep in missing:
+            if dep == 'yt-dlp':
+                subprocess.run(['pip', 'install', 'yt-dlp', '--upgrade'], check=True)
+            else:
+                subprocess.run(['pkg', 'install', dep, '-y'], check=True)
+        print_step('success', 'Semua dependencies berhasil diinstall!')
+    else:
+        print_step('success', 'Semua dependencies sudah tersedia')
 
 def get_video_info(url):
-    """Mendapatkan info video dengan berbagai metode untuk bypass bot detection"""
     print_step('info', f'Menganalisis link: {url}')
     
-    # List metode yang akan dicoba
-    methods = [
-        # Metode 1: Dengan cookie dari browser (paling ampuh)
-        {
-            'name': 'dengan cookie browser',
-            'cmd': [
-                'yt-dlp', '-J', '--no-playlist', '--no-warnings',
-                '--cookies-from-browser', 'chrome', '--no-check-certificate',
-                '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                url
-            ]
-        },
-        # Metode 2: Tanpa cookie tapi dengan User-Agent dan bypass signature
-        {
-            'name': 'tanpa cookie (bypass signature)',
-            'cmd': [
-                'yt-dlp', '-J', '--no-playlist', '--no-warnings',
-                '--no-check-certificate', '--sleep-requests', '2',
-                '--extractor-args', 'youtube:skip=webpage,player_client=android',
-                '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                url
-            ]
-        },
-        # Metode 3: Menggunakan client web dan mobile
-        {
-            'name': 'dengan client mobile',
-            'cmd': [
-                'yt-dlp', '-J', '--no-playlist', '--no-warnings',
-                '--extractor-args', 'youtube:player_client=android,web',
-                '--no-check-certificate',
-                url
-            ]
-        }
+    cmd = [
+        'yt-dlp', '-J', '--no-playlist', '--no-warnings',
+        '--geo-bypass', '--no-check-certificate',
+        '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        url
     ]
     
-    for method in methods:
-        try:
-            result = subprocess.run(method['cmd'], capture_output=True, text=True, timeout=60)
-            
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if data.get('formats'):
-                    print_step('success', f'Berhasil menganalisis {method["name"]}')
-                    return process_format_data(data, url)
-            else:
-                error_msg = result.stderr[:200]
-                if 'Sign in to confirm' in error_msg:
-                    print_step('warning', f'Metode {method["name"]} gagal (butuh login), coba metode lain...')
-                continue
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        
+        if result.returncode != 0:
+            error_msg = result.stderr[:300]
+            if 'CERTIFICATE_VERIFY_FAILED' in error_msg:
+                return {'error': 'Error SSL. Coba jalankan: python -c "import ssl; ssl._create_default_https_context = ssl._create_unverified_context"'}
+            return {'error': f'Gagal menganalisis: {error_msg}'}
+        
+        data = json.loads(result.stdout)
+        
+        formats = data.get('formats', [])
+        title = data.get('title', 'Unknown Title')
+        duration = data.get('duration', 0)
+        
+        safe_title = re.sub(r'[^\w\s-]', '', title)
+        safe_title = re.sub(r'[-\s]+', '-', safe_title).strip('-')[:50]
+        
+        video_formats = []
+        seen = set()
+        
+        for f in formats:
+            if f.get('vcodec') != 'none' and f.get('height'):
+                height = f.get('height', 0)
+                fps = f.get('fps') or 0
                 
-        except subprocess.TimeoutExpired:
-            print_step('warning', f'Timeout metode {method["name"]}, coba lagi...')
-        except json.JSONDecodeError:
-            print_step('warning', f'Gagal parse JSON metode {method["name"]}')
-        except Exception as e:
-            print_step('warning', f'Error metode {method["name"]}: {str(e)[:100]}')
-    
-    return {'error': 'Gagal menganalisis link setelah mencoba semua metode. Video mungkin private atau butuh login manual.'}
-
-def process_format_data(data, url):
-    """Memproses data format dari yt-dlp"""
-    formats = data.get('formats', [])
-    title = data.get('title', 'Unknown Title')
-    duration = data.get('duration', 0)
-    
-    # Bersihkan title untuk nama file
-    safe_title = re.sub(r'[^\w\s-]', '', title)
-    safe_title = re.sub(r'[-\s]+', '-', safe_title).strip('-')[:50]
-    
-    video_formats = []
-    seen = set()
-    
-    for f in formats:
-        if f.get('vcodec') != 'none' and f.get('height'):
-            height = f.get('height', 0)
-            fps = f.get('fps') or 0
-            
-            if height >= 2160:
-                res = '4K'
-            elif height >= 1440:
-                res = '2K'
-            elif height >= 1080:
-                res = '1080p'
-            elif height >= 720:
-                res = '720p'
-            elif height >= 480:
-                res = '480p'
-            elif height >= 360:
-                res = '360p'
-            else:
-                res = f'{height}p'
-            
-            if fps >= 60:
-                res = f'{res}{fps}fps'
-            
-            key = f"{height}_{fps}"
-            
-            if key not in seen:
-                seen.add(key)
-                filesize = f.get('filesize') or f.get('filesize_approx') or 0
-                has_audio = f.get('acodec') != 'none'
+                if height >= 2160:
+                    res = '4K'
+                elif height >= 1440:
+                    res = '2K'
+                elif height >= 1080:
+                    res = '1080p'
+                elif height >= 720:
+                    res = '720p'
+                elif height >= 480:
+                    res = '480p'
+                elif height >= 360:
+                    res = '360p'
+                else:
+                    res = f'{height}p'
                 
-                # Cari audio terpisah jika video tidak punya audio
-                audio_id = None
-                if not has_audio:
-                    for af in formats:
-                        if af.get('vcodec') == 'none' and af.get('acodec') != 'none':
-                            audio_id = af.get('format_id')
-                            break
+                if fps >= 60:
+                    res = f'{res}{fps}fps'
                 
-                video_formats.append({
-                    'id': f.get('format_id'),
-                    'resolution': res,
-                    'height': height,
-                    'fps': fps,
-                    'has_audio': has_audio,
-                    'filesize': filesize,
-                    'filesize_str': format_size(filesize) if filesize > 0 else '?',
-                    'audio_id': audio_id
-                })
-    
-    video_formats.sort(key=lambda x: (x['height'], x['fps']), reverse=True)
-    
-    audio_formats = []
-    seen_audio = set()
-    
-    for f in formats:
-        if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
-            abr = f.get('abr') or 0
-            if abr < 32:
-                continue
-            
-            if abr >= 256:
-                quality = '320kbps'
-            elif abr >= 192:
-                quality = '256kbps'
-            elif abr >= 128:
-                quality = '192kbps'
-            elif abr >= 64:
-                quality = '128kbps'
-            else:
-                quality = f'{int(abr)}kbps'
-            
-            if abr not in seen_audio:
-                seen_audio.add(abr)
-                filesize = f.get('filesize') or f.get('filesize_approx') or 0
-                audio_formats.append({
-                    'id': f.get('format_id'),
-                    'quality': quality,
-                    'bitrate': abr,
-                    'filesize': filesize,
-                    'filesize_str': format_size(filesize) if filesize > 0 else '?'
-                })
-    
-    audio_formats.sort(key=lambda x: x['bitrate'], reverse=True)
-    
-    return {
-        'title': title,
-        'safe_title': safe_title,
-        'duration': duration,
-        'duration_str': format_time(duration),
-        'video_formats': video_formats,
-        'audio_formats': audio_formats
-    }
+                key = f"{height}_{fps}"
+                
+                if key not in seen:
+                    seen.add(key)
+                    filesize = f.get('filesize') or f.get('filesize_approx') or 0
+                    has_audio = f.get('acodec') != 'none'
+                    
+                    audio_id = None
+                    if not has_audio:
+                        for af in formats:
+                            if af.get('vcodec') == 'none' and af.get('acodec') != 'none':
+                                audio_id = af.get('format_id')
+                                break
+                    
+                    video_formats.append({
+                        'id': f.get('format_id'),
+                        'resolution': res,
+                        'height': height,
+                        'fps': fps,
+                        'has_audio': has_audio,
+                        'filesize': filesize,
+                        'filesize_str': format_size(filesize) if filesize > 0 else '?',
+                        'audio_id': audio_id
+                    })
+        
+        video_formats.sort(key=lambda x: (x['height'], x['fps']), reverse=True)
+        
+        audio_formats = []
+        seen_audio = set()
+        
+        for f in formats:
+            if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
+                abr = f.get('abr') or 0
+                if abr < 32:
+                    continue
+                
+                if abr >= 256:
+                    quality = '320kbps'
+                elif abr >= 192:
+                    quality = '256kbps'
+                elif abr >= 128:
+                    quality = '192kbps'
+                elif abr >= 64:
+                    quality = '128kbps'
+                else:
+                    quality = f'{int(abr)}kbps'
+                
+                if abr not in seen_audio:
+                    seen_audio.add(abr)
+                    filesize = f.get('filesize') or f.get('filesize_approx') or 0
+                    audio_formats.append({
+                        'id': f.get('format_id'),
+                        'quality': quality,
+                        'bitrate': abr,
+                        'filesize': filesize,
+                        'filesize_str': format_size(filesize) if filesize > 0 else '?'
+                    })
+        
+        audio_formats.sort(key=lambda x: x['bitrate'], reverse=True)
+        
+        return {
+            'title': title,
+            'safe_title': safe_title,
+            'duration': duration,
+            'duration_str': format_time(duration),
+            'video_formats': video_formats,
+            'audio_formats': audio_formats
+        }
+        
+    except subprocess.TimeoutExpired:
+        return {'error': 'Timeout saat menganalisis link (mungkin video terlalu panjang)'}
+    except json.JSONDecodeError:
+        return {'error': 'Gagal memproses data dari server'}
+    except Exception as e:
+        return {'error': str(e)}
 
 def show_menu(info):
     clear()
@@ -338,7 +293,6 @@ def download_video(url, format_id, audio_id, title, resolution):
         'yt-dlp', '-f', format_spec, '--merge-output-format', 'mp4',
         '-o', str(filepath), '--no-playlist', '--progress', '--no-warnings',
         '--geo-bypass', '--no-check-certificate',
-        '--extractor-args', 'youtube:skip=webpage,player_client=android',
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         url
     ]
@@ -399,7 +353,6 @@ def download_audio(url, format_id, title, quality):
         'yt-dlp', '-f', format_id, '-x', '--audio-format', 'mp3',
         '-o', str(filepath), '--no-playlist', '--progress', '--no-warnings',
         '--geo-bypass', '--no-check-certificate',
-        '--extractor-args', 'youtube:skip=webpage,player_client=android',
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         url
     ]
@@ -461,7 +414,10 @@ def main():
     
     if 'error' in info:
         print_step('error', info['error'])
-        print_step('info', 'Tips: Coba buka video di browser HP Anda dulu, lalu jalankan ulang perintah ini')
+        if 'SSL' in info['error']:
+            print_step('info', 'Coba jalankan perintah berikut di Termux:')
+            print_step('info', 'export PYTHONHTTPSVERIFY=0')
+            print_step('info', 'python ytdl.py "' + url + '"')
         sys.exit(1)
     
     if not info['video_formats']:
