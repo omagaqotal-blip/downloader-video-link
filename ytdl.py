@@ -27,8 +27,8 @@ def clear():
 def print_banner():
     print(f"""
 {CYAN}╔══════════════════════════════════════════════════════════════╗
-║                    UNIVERSAL DOWNLOADER                          ║
-║              Support: YouTube, TikTok, Bilibili, dll             ║
+║                    UNIVERSAL DOWNLOADER                           ║
+║              Support: YouTube, TikTok, Bilibili, dll              ║
 ╚══════════════════════════════════════════════════════════════╝{NC}
 """)
 
@@ -67,8 +67,8 @@ def check_dependencies():
     missing = []
     
     try:
-        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
-        print_step('success', 'yt-dlp sudah terinstall')
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
+        print_step('success', f'yt-dlp versi {result.stdout.strip()} terinstall')
     except:
         print_step('warning', 'yt-dlp tidak ditemukan, menginstall...')
         missing.append('yt-dlp')
@@ -84,7 +84,7 @@ def check_dependencies():
         print_step('info', f'Menginstall: {", ".join(missing)}')
         for dep in missing:
             if dep == 'yt-dlp':
-                subprocess.run(['pip', 'install', 'yt-dlp', '--upgrade'], check=True)
+                subprocess.run(['pip', 'install', '--upgrade', 'yt-dlp'], check=True)
             else:
                 subprocess.run(['pkg', 'install', dep, '-y'], check=True)
         print_step('success', 'Semua dependencies berhasil diinstall!')
@@ -102,19 +102,33 @@ def get_video_info(url):
     ]
     
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        env = os.environ.copy()
+        env['SSL_CERT_FILE'] = certifi.where()
+        env['REQUESTS_CA_BUNDLE'] = certifi.where()
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
         
         if result.returncode != 0:
-            error_msg = result.stderr[:300]
-            if 'CERTIFICATE_VERIFY_FAILED' in error_msg:
-                return {'error': 'Error SSL. Coba jalankan: python -c "import ssl; ssl._create_default_https_context = ssl._create_unverified_context"'}
-            return {'error': f'Gagal menganalisis: {error_msg}'}
+            stderr = result.stderr
+            if 'SSL: CERTIFICATE_VERIFY_FAILED' in stderr:
+                print_step('warning', 'Error SSL, mencoba dengan opsi bypass...')
+                cmd_no_ssl = [
+                    'yt-dlp', '-J', '--no-playlist', '--no-warnings',
+                    '--no-check-certificate', '--geo-bypass',
+                    '--add-header', 'User-Agent:Mozilla/5.0',
+                    url
+                ]
+                result = subprocess.run(cmd_no_ssl, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode != 0:
+                return {'error': f'Gagal menganalisis: {result.stderr[:300]}'}
         
         data = json.loads(result.stdout)
         
         formats = data.get('formats', [])
         title = data.get('title', 'Unknown Title')
         duration = data.get('duration', 0)
+        thumbnail = data.get('thumbnail', '')
         
         safe_title = re.sub(r'[^\w\s-]', '', title)
         safe_title = re.sub(r'[-\s]+', '-', safe_title).strip('-')[:50]
@@ -123,8 +137,11 @@ def get_video_info(url):
         seen = set()
         
         for f in formats:
-            if f.get('vcodec') != 'none' and f.get('height'):
-                height = f.get('height', 0)
+            if f.get('vcodec') != 'none' and f.get('vcodec') is not None:
+                height = f.get('height') or 0
+                if height == 0:
+                    continue
+                
                 fps = f.get('fps') or 0
                 
                 if height >= 2160:
@@ -143,14 +160,14 @@ def get_video_info(url):
                     res = f'{height}p'
                 
                 if fps >= 60:
-                    res = f'{res}{fps}fps'
+                    res = f'{res} {fps}fps'
                 
                 key = f"{height}_{fps}"
                 
                 if key not in seen:
                     seen.add(key)
                     filesize = f.get('filesize') or f.get('filesize_approx') or 0
-                    has_audio = f.get('acodec') != 'none'
+                    has_audio = f.get('acodec') != 'none' and f.get('acodec') is not None
                     
                     audio_id = None
                     if not has_audio:
@@ -205,21 +222,25 @@ def get_video_info(url):
         
         audio_formats.sort(key=lambda x: x['bitrate'], reverse=True)
         
+        if not video_formats and not audio_formats:
+            return {'error': 'Tidak ada format video/audio yang ditemukan'}
+        
         return {
             'title': title,
             'safe_title': safe_title,
             'duration': duration,
             'duration_str': format_time(duration),
+            'thumbnail': thumbnail,
             'video_formats': video_formats,
             'audio_formats': audio_formats
         }
         
     except subprocess.TimeoutExpired:
-        return {'error': 'Timeout saat menganalisis link (mungkin video terlalu panjang)'}
-    except json.JSONDecodeError:
-        return {'error': 'Gagal memproses data dari server'}
+        return {'error': 'Timeout saat menganalisis link (lebih dari 60 detik)'}
+    except json.JSONDecodeError as e:
+        return {'error': f'Gagal memproses data: {str(e)[:100]}'}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': str(e)[:200]}
 
 def show_menu(info):
     clear()
@@ -329,6 +350,8 @@ def download_video(url, format_id, audio_id, title, resolution):
             return True
         else:
             print_step('error', 'Download gagal!')
+            if filepath.exists():
+                filepath.unlink()
             return False
             
     except Exception as e:
@@ -351,8 +374,8 @@ def download_audio(url, format_id, title, quality):
     
     cmd = [
         'yt-dlp', '-f', format_id, '-x', '--audio-format', 'mp3',
-        '-o', str(filepath), '--no-playlist', '--progress', '--no-warnings',
-        '--geo-bypass', '--no-check-certificate',
+        '--audio-quality', '0', '-o', str(filepath), '--no-playlist', 
+        '--progress', '--no-warnings', '--geo-bypass', '--no-check-certificate',
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         url
     ]
@@ -383,6 +406,8 @@ def download_audio(url, format_id, title, quality):
             return True
         else:
             print_step('error', 'Download gagal!')
+            if filepath.exists():
+                filepath.unlink()
             return False
             
     except Exception as e:
@@ -414,20 +439,18 @@ def main():
     
     if 'error' in info:
         print_step('error', info['error'])
-        if 'SSL' in info['error']:
-            print_step('info', 'Coba jalankan perintah berikut di Termux:')
-            print_step('info', 'export PYTHONHTTPSVERIFY=0')
-            print_step('info', 'python ytdl.py "' + url + '"')
-        sys.exit(1)
-    
-    if not info['video_formats']:
-        print_step('error', 'Tidak ada format video yang tersedia untuk link ini')
+        print_step('info', 'Tips: Pastikan URL valid dan koneksi internet stabil')
         sys.exit(1)
     
     while True:
         choice = show_menu(info)
         
         if choice == '1':
+            if not info['video_formats']:
+                print_step('error', 'Tidak ada format video yang tersedia!')
+                time.sleep(2)
+                continue
+            
             while True:
                 video_choice = show_video_menu(info['video_formats'])
                 
